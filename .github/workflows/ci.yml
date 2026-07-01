@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+# Cancela runs antigas se um novo commit chegar
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint, Typecheck, Test, Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      matrix:
+        node: [20, 22]
+      fail-fast: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test -- --ci
+
+      - name: Build
+        run: npm run build
+        env:
+          # Variaveis dummy para o build nao quebrar sem .env.local.
+          # O build nao chama IA real, so checa que tudo compila.
+          NEXT_PUBLIC_SUPABASE_URL: https://placeholder.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key
+          AI_API_KEY: placeholder
+          AI_PROVIDER: openai
+          AI_BASE_URL: https://api.openai.com/v1
+          AI_MODEL: gpt-4o-mini
+
+  security-audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Audit production deps
+        run: npm audit --omit=dev --audit-level=high
+      - name: Audit dev deps
+        run: npm audit --audit-level=high
