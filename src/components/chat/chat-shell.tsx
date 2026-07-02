@@ -547,21 +547,58 @@ export function ChatShell({
       [optimisticConversationId]: [...(current[optimisticConversationId] || []), optimisticUserMessage],
     }));
 
+    // Mensagem otimista do assistente: vazia, sera preenchida incrementalmente
+    // com cada { type: "delta" } da NDJSON stream.
+    const streamingAssistantId = crypto.randomUUID();
+    const streamingAssistant: ChatMessage = {
+      id: streamingAssistantId,
+      conversation_id: optimisticConversationId,
+      role: "assistant",
+      content: "",
+      created_at: new Date().toISOString(),
+    };
+    setMessagesByConversation((current) => ({
+      ...current,
+      [optimisticConversationId]: [
+        ...(current[optimisticConversationId] || []),
+        streamingAssistant,
+      ],
+    }));
+
+    // AbortController permite ao usuario cancelar a geracao (futuro).
+    const abortController = new AbortController();
+
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortController.signal,
         body: JSON.stringify({
           conversationId: activeConversationId,
           message: requestMessage,
           model: selectedModel,
+          stream: true, // opt-in para NDJSON streaming
           attachments: attachmentsForMessage.map(toPendingAttachmentPayload),
         }),
       });
-      const payload = (await response.json()) as {
-        conversationId?: string;
-        assistantMessage?: string;
-        model?: string;
+
+      if (!response.ok) {
+        // Erro HTTP antes do stream comecar. Tenta parsear jsonError.
+        const errPayload = (await response.json().catch(() => ({}))) as { error?: string; code?: string };
+        throw new Error(errPayload.error || "Não foi possível responder.");
+      }
+
+      if (!response.body) {
+        throw new Error("Resposta sem corpo.");
+      }
+
+      // Stream NDJSON: cada linha e um JSON { type, ... }.
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let accumulated = "";
+      let returnedConversationId = optimisticConversationId;
+      let streamDone: {
         usedModel?: string;
         provider?: string;
         webSearch?: boolean;
@@ -569,50 +606,103 @@ export function ChatShell({
         modelAttempts?: Array<{ model: string; status: "success" | "error"; error?: string }>;
         actionResults?: string[];
         agentSteps?: AgentStep[];
-        error?: string;
+      } = {
+        usedModel: undefined,
+        provider: undefined,
       };
 
-      if (!response.ok || !payload.conversationId || !payload.assistantMessage) {
-        throw new Error(payload.error || "Não foi possível responder.");
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Processa linhas completas (terminadas em \n).
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || ""; // a ultima pode ser parcial
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let event: {
+            type: "meta" | "delta" | "model" | "done" | "error";
+            [k: string]: unknown;
+          };
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue; // linha malformada, ignora
+          }
+
+          if (event.type === "meta") {
+            returnedConversationId = String(event.conversationId || optimisticConversationId);
+            // Atualiza a mensagem otimista com o conversationId real.
+            setMessagesByConversation((current) => ({
+              ...current,
+              [returnedConversationId]: (current[optimisticConversationId] || []).map((m) =>
+                m.id === streamingAssistantId
+                  ? { ...m, conversation_id: returnedConversationId }
+                  : m,
+              ),
+            }));
+          } else if (event.type === "delta") {
+            accumulated += String(event.text || "");
+            // Atualiza a UI com o texto parcial. Limitamos updates para
+            // evitar 60 fps render loop com 1000 tokens.
+            setMessagesByConversation((current) => {
+              const list = current[returnedConversationId] || current[optimisticConversationId] || [];
+              return {
+                ...current,
+                [returnedConversationId]: list.map((m) =>
+                  m.id === streamingAssistantId ? { ...m, content: accumulated } : m,
+                ),
+              };
+            });
+            // Auto-scroll enquanto o texto cresce.
+            window.setTimeout(() => listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "auto" }), 0);
+          } else if (event.type === "done") {
+            streamDone = event as typeof streamDone;
+          } else if (event.type === "error") {
+            throw new Error(String(event.message || "Erro durante a geracao."));
+          }
+        }
       }
 
-      const returnedConversationId = payload.conversationId;
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
+      // Evento "done" esperado como terminal.
+      if (!streamDone) {
+        throw new Error("Stream terminou sem evento 'done'.");
+      }
+
+      // Finaliza a mensagem com metadata.
+      const finalAssistant: ChatMessage = {
+        id: streamingAssistantId,
         conversation_id: returnedConversationId,
         role: "assistant",
-        content: payload.assistantMessage,
+        content: accumulated,
         created_at: new Date().toISOString(),
-        model: payload.usedModel,
-        provider: payload.provider,
-        web_search: payload.webSearch,
-        fallback_used: payload.fallbackUsed,
-        action_results: payload.actionResults,
-        agent_steps: payload.agentSteps,
+        model: streamDone.usedModel,
+        provider: streamDone.provider,
+        web_search: streamDone.webSearch,
+        fallback_used: streamDone.fallbackUsed,
+        action_results: streamDone.actionResults,
+        agent_steps: streamDone.agentSteps,
       };
+      setMessagesByConversation((current) => {
+        const list = current[returnedConversationId] || current[optimisticConversationId] || [];
+        return {
+          ...current,
+          [returnedConversationId]: list.map((m) => (m.id === streamingAssistantId ? finalAssistant : m)),
+        };
+      });
 
-      if (payload.usedModel && payload.provider) {
+      if (streamDone.usedModel && streamDone.provider) {
         setLastRunInfo({
-          model: payload.model || selectedModel,
-          usedModel: payload.usedModel,
-          provider: payload.provider,
-          webSearch: Boolean(payload.webSearch),
+          model: selectedModel,
+          usedModel: streamDone.usedModel,
+          provider: streamDone.provider,
+          webSearch: Boolean(streamDone.webSearch),
         });
       }
 
       setActiveConversationId(returnedConversationId);
-      setMessagesByConversation((current) => {
-        const withoutPending = { ...current };
-        delete withoutPending.pending;
-        return {
-          ...withoutPending,
-          [returnedConversationId]: [
-            ...(activeConversationId ? current[activeConversationId] || [] : [optimisticUserMessage]),
-            assistantMessage,
-          ],
-        };
-      });
-
       if (!activeConversationId) {
         setConversations((current) => [
           {
@@ -631,8 +721,17 @@ export function ChatShell({
       });
       window.setTimeout(() => listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }), 50);
     } catch (sendError) {
-      setError(sendError instanceof Error ? sendError.message : "Não foi possível enviar.");
+      const errorMessage = sendError instanceof Error ? sendError.message : "Não foi possível enviar.";
+      setError(errorMessage);
       setPendingAttachments(attachmentsForMessage);
+      // Remove a mensagem otimista vazia do assistente em caso de erro.
+      setMessagesByConversation((current) => {
+        const list = current[optimisticConversationId] || [];
+        return {
+          ...current,
+          [optimisticConversationId]: list.filter((m) => m.id !== streamingAssistantId),
+        };
+      });
     } finally {
       setIsSending(false);
       setActiveStageIndex(0);

@@ -469,3 +469,100 @@ describe("resolveRuntimeModel (re-export from brain)", () => {
     expect(resolveRuntimeModel("openai/gpt-4o", false)).toBe("openai/gpt-4o");
   });
 });
+
+describe("runBrainStream (streaming variant)", () => {
+  it("yields delta events for each chunk, then a done event", async () => {
+    // Mock OpenAI to return an async iterable of chunks.
+    mockCreate.mockImplementationOnce(async () => {
+      return (async function* () {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        yield { choices: [{ delta: { content: "Hello" } }] } as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        yield { choices: [{ delta: { content: " world" } }] } as any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        yield { choices: [{ delta: { content: "!" } }] } as any;
+      })();
+    });
+
+    const { runBrainStream } = await import("@/lib/ai/brain");
+    const events: unknown[] = [];
+    for await (const event of runBrainStream({
+      userMessage: "oi",
+      recentMessages: [],
+      memories: [],
+      model: "primary",
+      userPreferences: undefined,
+    })) {
+      events.push(event);
+    }
+
+    const deltas = events.filter((e) => (e as { type: string }).type === "delta");
+    const done = events.find((e) => (e as { type: string }).type === "done");
+
+    expect(deltas).toHaveLength(3);
+    expect(deltas[0]).toMatchObject({ type: "delta", text: "Hello" });
+    expect(deltas[2]).toMatchObject({ type: "delta", text: "!" });
+    expect(done).toMatchObject({
+      type: "done",
+      usedModel: "primary",
+      fallbackUsed: false,
+    });
+  });
+
+  it("falls back to next model when stream errors", async () => {
+    // First model throws, second returns a working stream.
+    mockCreate
+      .mockImplementationOnce(async () => {
+        throw new Error("primary broken");
+      })
+      .mockImplementationOnce(async () => {
+        return (async function* () {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          yield { choices: [{ delta: { content: "fallback text" } }] } as any;
+        })();
+      });
+
+    const { runBrainStream } = await import("@/lib/ai/brain");
+    const events: unknown[] = [];
+    for await (const event of runBrainStream({
+      userMessage: "oi",
+      recentMessages: [],
+      memories: [],
+      model: "primary",
+      userPreferences: undefined,
+    })) {
+      events.push(event);
+    }
+
+    const modelErr = events.find(
+      (e) => (e as { type: string }).type === "model" && (e as { status: string }).status === "error",
+    );
+    const deltas = events.filter((e) => (e as { type: string }).type === "delta");
+    const done = events.find((e) => (e as { type: string }).type === "done");
+
+    expect(modelErr).toBeDefined();
+    expect(deltas).toHaveLength(1);
+    expect(done).toMatchObject({ type: "done", usedModel: "fallback-1" });
+  });
+
+  it("yields error event when all models fail", async () => {
+    mockCreate.mockImplementation(async () => {
+      throw new Error("down");
+    });
+
+    const { runBrainStream } = await import("@/lib/ai/brain");
+    const events: unknown[] = [];
+    for await (const event of runBrainStream({
+      userMessage: "oi",
+      recentMessages: [],
+      memories: [],
+      model: "primary",
+      userPreferences: undefined,
+    })) {
+      events.push(event);
+    }
+
+    const errorEvent = events.find((e) => (e as { type: string }).type === "error");
+    expect(errorEvent).toMatchObject({ type: "error", message: expect.stringContaining("Todos os modelos") });
+  });
+});

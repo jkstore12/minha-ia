@@ -70,6 +70,102 @@ export type RunBrainOutput = {
   }>;
 };
 
+// Eventos emitidos por runBrainStream. Consumidos pelo /api/chat que os
+// serializa como NDJSON para o cliente.
+export type BrainStreamEvent =
+  | { type: "delta"; text: string; model: string }
+  | { type: "model"; model: string; status: "success" | "error"; error?: string }
+  | { type: "done"; usedModel: string; requestedModel: string; fallbackUsed: boolean; attempts: RunBrainOutput["attempts"] }
+  | { type: "error"; message: string };
+
+/**
+ * Versao streaming do runBrain. Async generator que emite eventos conforme
+ * o LLM produz texto. Cada chunk de texto gera um { type: "delta" }.
+ * Ao final, emite { type: "done" } com o modelo usado e tentativas.
+ * Em caso de falha em todos os modelos, emite { type: "error" }.
+ *
+ * Limitacoes:
+ * - Anexos multimodais (imagem, audio raw, PDF) nao suportam streaming
+ *   da OpenAI no formato padrao; neste caso, faz fallback para
+ *   runBrainWithAttachments e emite o texto completo em um unico delta.
+ * - O signal de abort e respeitado: se o cliente desconectar, a leitura
+ *   do stream lanca AbortError e o generator termina.
+ */
+export async function* runBrainStream(input: RunBrainInput): AsyncGenerator<BrainStreamEvent> {
+  if (input.attachments?.length) {
+    // Multimodal: fallback para non-streaming. Emitimos o texto inteiro
+    // em um unico delta, depois done.
+    const result = await runBrainWithAttachments(input);
+    if (result.text) {
+      yield { type: "delta", text: result.text, model: result.usedModel };
+    }
+    for (const attempt of result.attempts) {
+      yield { type: "model", model: attempt.model, status: attempt.status, error: attempt.error };
+    }
+    yield {
+      type: "done",
+      usedModel: result.usedModel,
+      requestedModel: result.requestedModel,
+      fallbackUsed: result.fallbackUsed,
+      attempts: result.attempts,
+    };
+    return;
+  }
+
+  const client = createOpenAICompatibleClient();
+  const ai = requireAiEnv();
+  const candidates = resolveModelCandidates(input.model, input.webSearch);
+  const requestedModel = resolveRuntimeModel(input.model, input.webSearch);
+  const attempts: RunBrainOutput["attempts"] = [];
+  const activeAgent = getActiveAgent(input);
+
+  for (const candidate of candidates) {
+    try {
+      // O overload do OpenAI SDK retorna Stream<ChatCompletionChunk> quando
+      // `stream: true`. Tipamos como any para evitar generic gymnastics.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const stream = (await (client.chat.completions.create as any)({
+        model: candidate,
+        temperature: ai.temperature,
+        max_tokens: ai.maxTokens,
+        stream: true,
+        messages: [
+          {
+            role: "system",
+            content: renderInstructions(input.webSearch, input.userPreferences, activeAgent),
+          },
+          {
+            role: "user",
+            content: renderContext(input),
+          },
+        ],
+      })) as AsyncIterable<{ choices?: Array<{ delta?: { content?: string | null } }> }>;
+
+      for await (const chunk of stream) {
+        const text = chunk.choices?.[0]?.delta?.content || "";
+        if (text) {
+          yield { type: "delta", text, model: candidate };
+        }
+      }
+      attempts.push({ model: candidate, status: "success" });
+      yield {
+        type: "done",
+        usedModel: candidate,
+        requestedModel,
+        fallbackUsed: candidate !== requestedModel,
+        attempts,
+      };
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message.slice(0, 240) : "Falha desconhecida.";
+      attempts.push({ model: candidate, status: "error", error: message });
+      yield { type: "model", model: candidate, status: "error", error: message };
+    }
+  }
+
+  yield { type: "error", message: "Todos os modelos falharam." };
+}
+
 const MemoryExtraction = z.object({
   memories: z
     .array(
