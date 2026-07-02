@@ -48,7 +48,9 @@ export async function GET(_request: Request, context: RouteContext) {
     headers: {
       "Content-Type": attachment.mime_type || "application/octet-stream",
       "Content-Disposition": `inline; filename="${encodeURIComponent(attachment.file_name)}"`,
-      "Cache-Control": "private, max-age=300",
+      // private, no-store: arquivos do usuario podem conter PII.
+      // Nenhum proxy/CDn deve cachear.
+      "Cache-Control": "private, no-store",
     },
   });
 }

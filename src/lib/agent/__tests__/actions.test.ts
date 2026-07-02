@@ -5,8 +5,11 @@ import {
   extractUrls,
   inferRecurrence,
   inferReminderDate,
+  isBlockedAddress,
   isBlockedHost,
   normalizeText,
+  resolveAndCheckAddress,
+  type LookupFn,
 } from "@/lib/agent/actions";
 
 describe("normalizeText", () => {
@@ -209,5 +212,116 @@ describe("inferRecurrence", () => {
 
   it("defaults to 'daily' otherwise", () => {
     expect(inferRecurrence("alguma tarefa")).toBe("daily");
+  });
+});
+
+describe("isBlockedAddress (DNS rebinding mitigation)", () => {
+  it.each([
+    "127.0.0.1",
+    "127.255.255.254",
+    "10.0.0.1",
+    "10.255.255.255",
+    "192.168.0.1",
+    "172.16.0.1",
+    "172.20.10.5",
+    "172.31.255.255",
+    "169.254.169.254",
+    "0.0.0.0",
+    "224.0.0.1",
+    "239.255.255.255",
+    "::1",
+    "fe80::1",
+    "fc00::1",
+    "fd12:3456:789a::1",
+    "ff02::1",
+  ])("blocks %s (loopback/private/link-local/multicast)", (addr) => {
+    expect(isBlockedAddress(addr)).toBe(true);
+  });
+
+  it.each([
+    "8.8.8.8",
+    "1.1.1.1",
+    "172.15.0.1",
+    "172.32.0.1",
+    "11.0.0.1",
+    "193.168.1.1",
+    "2001:4860:4860::8888",
+  ])("allows %s (public)", (addr) => {
+    expect(isBlockedAddress(addr)).toBe(false);
+  });
+
+  it("handles IPv4-mapped IPv6 (::ffff:127.0.0.1)", () => {
+    expect(isBlockedAddress("::ffff:127.0.0.1")).toBe(true);
+    expect(isBlockedAddress("::ffff:8.8.8.8")).toBe(false);
+  });
+
+  it("blocks empty / unparseable strings (default-deny)", () => {
+    expect(isBlockedAddress("")).toBe(true);
+    expect(isBlockedAddress("not-an-ip")).toBe(true);
+  });
+});
+
+describe("resolveAndCheckAddress (DNS rebinding mitigation)", () => {
+  const safeLookup: LookupFn = async () => [{ address: "8.8.8.8", family: 4 }];
+  const evilLookup: LookupFn = async () => [{ address: "127.0.0.1", family: 4 }];
+  const multiLookup: LookupFn = async () => [
+    { address: "8.8.8.8", family: 4 },
+    { address: "10.0.0.1", family: 4 },
+  ];
+  const emptyLookup: LookupFn = async () => [];
+  const failingLookup: LookupFn = async () => {
+    throw new Error("ENOTFOUND");
+  };
+
+  it("allows when all resolved IPs are public", async () => {
+    const result = await resolveAndCheckAddress("example.com", { lookupOverride: safeLookup });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.addresses).toEqual(["8.8.8.8"]);
+    }
+  });
+
+  it("blocks when ANY resolved IP is private (multi-A records)", async () => {
+    // Cenario DNS rebinding classico: atacante retorna IP legitimo +
+    // IP privado. O segundo e o que vai ser usado pela conexao.
+    const result = await resolveAndCheckAddress("evil.example.com", { lookupOverride: multiLookup });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/10\.0\.0\.1/);
+    }
+  });
+
+  it("blocks when ALL resolved IPs are loopback", async () => {
+    const result = await resolveAndCheckAddress("attacker.example.com", { lookupOverride: evilLookup });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/127\.0\.0\.1/);
+    }
+  });
+
+  it("blocks when DNS returns no addresses (fail-closed)", async () => {
+    const result = await resolveAndCheckAddress("nothing.example.com", { lookupOverride: emptyLookup });
+    expect(result.ok).toBe(false);
+  });
+
+  it("blocks when DNS lookup throws (fail-closed)", async () => {
+    const result = await resolveAndCheckAddress("offline.example.com", { lookupOverride: failingLookup });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toMatch(/ENOTFOUND/);
+    }
+  });
+
+  it("respects timeoutMs option (negative test using slow lookup)", async () => {
+    const slowLookup: LookupFn = (_hostname, opts) =>
+      new Promise((_resolve, reject) => {
+        opts.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        setTimeout(() => reject(new Error("would not abort in time")), 200);
+      });
+    const result = await resolveAndCheckAddress("slow.example.com", {
+      lookupOverride: slowLookup,
+      timeoutMs: 30,
+    });
+    expect(result.ok).toBe(false);
   });
 });

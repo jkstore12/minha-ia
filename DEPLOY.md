@@ -159,6 +159,27 @@ EVOLUTION_API_URL=https://sua-evolution-api.com
 EVOLUTION_API_KEY=...
 WHATSAPP_INSTANCE_NAME=minha-ia
 WHATSAPP_OWNER_USER_ID=<uuid-do-user-owner-no-supabase>
+
+# Segredo do webhook WhatsApp. OBRIGATORIO em producao.
+# O endpoint /api/webhook-whatsapp e fail-closed: sem secret, retorna 503.
+# Aceita o header `x-webhook-secret` ou o query param `?secret=<valor>`.
+WHATSAPP_WEBHOOK_SECRET=$(openssl rand -hex 32)
+```
+
+Como injetar o header (a Evolution API nao envia um header padrao):
+
+**Opcao A — Reverse proxy (Caddy/Nginx)** na frente da Vercel:
+```
+# Caddy
+header_up x-webhook-secret {env.WHATSAPP_WEBHOOK_SECRET}
+reverse_proxy minha-ia-orquestrador.vercel.app
+```
+
+**Opcao B — Configuracao por instancia na Evolution API** (varia por versao; consulte a doc): procure por "webhook custom headers" ou "webhook headers" nas configuracoes da instancia e adicione `x-webhook-secret: <seu-segredo>`.
+
+**Opcao C — Query string** (menos recomendado, segredo fica em URL/logs):
+```
+https://minha-ia-orquestrador.vercel.app/api/webhook-whatsapp?secret=<WHATSAPP_WEBHOOK_SECRET>
 ```
 
 ---
@@ -227,6 +248,18 @@ Verifique que `AI_API_KEY` (ou `OPENAI_API_KEY` / `OPENROUTER_API_KEY`) e `AI_MO
 
 ### "Webhook nao autorizado" (Telegram)
 `TELEGRAM_WEBHOOK_SECRET` no `.env.local` e no registro do webhook devem bater exatamente.
+
+### "Webhook WhatsApp retornando 503"
+`WHATSAPP_WEBHOOK_SECRET` nao esta configurado no Vercel. Defina a env var e garanta que o reverse proxy ou a Evolution API envia `x-webhook-secret: <valor>` na requisicao.
+
+### "Webhook WhatsApp retornando 401"
+O secret esta configurado mas o header `x-webhook-secret` (ou query `?secret=`) nao esta batendo. Verifique que o reverse proxy injeta o header antes do request chegar ao Vercel e que o valor e exatamente o mesmo.
+
+### "Anexo rejeitado com erro 415"
+O `/api/attachments` agora faz magic-byte sniffing. Se o cliente declara `image/jpeg` mas os bytes sao de outro formato (ex.: PDF, EXE renomeado), o upload e rejeitado. Verifique que o arquivo e realmente do tipo declarado, ou ajuste o `ALLOWED_ATTACHMENT_MIMES` em `src/lib/chat/attachments.ts` para o seu caso.
+
+### "Deep health check pula o probe de IA"
+O `/api/health?deep=1` so faz `Authorization: Bearer <AI_API_KEY>` para hosts em allow-list (api.openai.com, openrouter.ai, etc). Se voce usa um provedor custom, adicione o host em `ALLOWED_AI_PROBE_HOSTS` em `src/app/api/health/route.ts`.
 
 ### "Muitas mensagens em pouco tempo"
 Rate limit atingido. Ajuste `CHAT_RATE_LIMIT_PER_MIN` e `CHAT_RATE_LIMIT_PER_DAY` no `.env.local`.

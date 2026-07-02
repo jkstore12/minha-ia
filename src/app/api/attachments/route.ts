@@ -3,13 +3,16 @@ import {
   CHAT_ATTACHMENTS_BUCKET,
   MAX_ATTACHMENT_BYTES,
   sanitizeFileName,
+  sniffAndValidateMime,
 } from "@/lib/chat/attachments";
 import { hasSupabaseEnv } from "@/lib/env";
 import { createClient } from "@/lib/supabase/server";
+import { createLogger } from "@/lib/log";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
+  const logger = createLogger("attachments-upload");
   if (!hasSupabaseEnv()) {
     return NextResponse.json({ error: "Supabase não configurado." }, { status: 503 });
   }
@@ -35,9 +38,38 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Arquivo grande demais. Limite: 25 MB por arquivo." }, { status: 413 });
   }
 
+  // Magic-byte sniffing para evitar que um `.exe` renomeado para `.jpg`
+  // seja armazenado e servido como image/jpeg. Se o cliente declara
+  // image/jpeg mas os magic bytes sao de PDF, usamos o detectado.
+  const sniff = await sniffAndValidateMime({
+    name: file.name,
+    type: file.type,
+    size: file.size,
+    slice: (start, end) => file.slice(start, end),
+  });
+
+  if (!sniff.ok) {
+    logger.warn("attachment.rejected", {
+      userId: user.id,
+      fileName: file.name,
+      declaredType: file.type,
+      sizeBytes: file.size,
+      reason: sniff.reason,
+      detectedMime: sniff.detectedMime,
+    });
+    return NextResponse.json(
+      {
+        error: "Tipo de arquivo nao permitido.",
+        reason: sniff.reason,
+        ...(sniff.detectedMime ? { detectedMime: sniff.detectedMime } : {}),
+      },
+      { status: 415 },
+    );
+  }
+
   const fileName = sanitizeFileName(file.name);
   const storagePath = `${user.id}/${crypto.randomUUID()}-${fileName}`;
-  const mimeType = file.type || "application/octet-stream";
+  const mimeType = sniff.mime;
 
   const { error: uploadError } = await supabase.storage
     .from(CHAT_ATTACHMENTS_BUCKET)
@@ -47,6 +79,13 @@ export async function POST(request: Request) {
     });
 
   if (uploadError) {
+    logger.error("attachment.upload.failed", {
+      userId: user.id,
+      fileName,
+      mimeType,
+      sizeBytes: file.size,
+      supabaseError: uploadError.message,
+    });
     return NextResponse.json(
       { error: "Não foi possível enviar o arquivo. Confira se o setup do Supabase Storage foi aplicado." },
       { status: 500 },

@@ -7,6 +7,44 @@ export const runtime = "nodejs";
 const DEFAULT_EVOLUTION_API_URL = "https://evolution-api-production-d8ba.up.railway.app";
 const HEALTH_TIMEOUT_MS = 5000;
 
+// Allow-list de hosts que podem receber o probe de IA em deep mode.
+// Em modo deep o health endpoint envia Authorization: Bearer <AI_API_KEY>
+// para AI_BASE_URL. Se o operador setar AI_BASE_URL para um host
+// arbitrario (typo, injecao), essa allow-list impede que a chave vaze.
+const ALLOWED_AI_PROBE_HOSTS = new Set<string>([
+  "api.openai.com",
+  "openrouter.ai",
+  "api.anthropic.com",
+  "generativelanguage.googleapis.com",
+  "api.deepseek.com",
+  "api.groq.com",
+  "api.mistral.ai",
+  "api.cohere.ai",
+  "api.together.xyz",
+  "api.fireworks.ai",
+  "openai.azure.com", // Azure OpenAI
+  "aiplatform.googleapis.com", // Vertex AI
+]);
+
+function extractHostname(rawUrl: string): string | null {
+  try {
+    return new URL(rawUrl).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+export function isAiBaseUrlAllowed(baseUrl: string | undefined | null): boolean {
+  if (!baseUrl) return false;
+  const hostname = extractHostname(baseUrl);
+  if (!hostname) return false;
+  // Permite tambem subdominios (ex: api.us.openai.com para tenants regionais).
+  for (const allowed of ALLOWED_AI_PROBE_HOSTS) {
+    if (hostname === allowed || hostname.endsWith(`.${allowed}`)) return true;
+  }
+  return false;
+}
+
 type ServiceStatus = {
   id: string;
   label: string;
@@ -90,6 +128,25 @@ async function checkAiProvider(deep: boolean): Promise<ServiceStatus> {
       status: "ok",
       message: "Chave e modelo configurados.",
       details: { provider: env.aiProvider, model: env.aiModel, tested: false },
+    });
+  }
+
+  // Em deep mode, o probe envia Authorization: Bearer <key>. So
+  // fazemos isso se AI_BASE_URL estiver em uma allow-list de provedores
+  // conhecidos — caso contrario a chave poderia vazar para um host
+  // arbitrario (typo, injecao).
+  if (!isAiBaseUrlAllowed(env.aiBaseUrl)) {
+    return serviceStatus({
+      id: "ai",
+      label: "IA principal",
+      status: "warning",
+      message: "AI_BASE_URL fora da allow-list — probe ignorado por seguranca.",
+      details: {
+        provider: env.aiProvider,
+        model: env.aiModel,
+        baseUrlHost: extractHostname(env.aiBaseUrl || ""),
+        tested: false,
+      },
     });
   }
 
@@ -306,9 +363,9 @@ function checkSupabaseService(database: DatabaseHealth): ServiceStatus {
 
 export async function GET(request: Request) {
   const deep = new URL(request.url).searchParams.get("deep") === "1";
-  const setup = getSetupStatus();
-  const ready = setup.supabase.configured && setup.ai.configured;
-  const database: DatabaseHealth = setup.supabase.configured ? await checkSupabaseObjects() : { checked: false };
+  const rawSetup = getSetupStatus();
+  const ready = rawSetup.supabase.configured && rawSetup.ai.configured;
+  const database: DatabaseHealth = rawSetup.supabase.configured ? await checkSupabaseObjects() : { checked: false };
   const services = await Promise.all([
     Promise.resolve(checkSupabaseService(database)),
     checkAiProvider(deep),
@@ -319,6 +376,23 @@ export async function GET(request: Request) {
   ]);
   const score = Math.round((services.filter((service) => service.status === "ok").length / services.length) * 100);
   const hasError = services.some((service) => service.status === "error");
+
+  // Scrubbing: /api/health e publico (sem auth). Em modo shallow,
+  // removemos provider/model do payload — sao uteis para quem opera o
+  // servico mas sao recon para quem nao deveria saber. O caller
+  // continua podendo ver "configured: true/false" e o score geral.
+  const setup = deep
+    ? rawSetup
+    : {
+        supabase: rawSetup.supabase,
+        ai: {
+          ...rawSetup.ai,
+          provider: rawSetup.ai.configured ? "configured" : "missing",
+          model: rawSetup.ai.configured ? "configured" : "missing",
+          baseUrl: undefined,
+          fallbackModels: [],
+        },
+      };
 
   return NextResponse.json(
     {

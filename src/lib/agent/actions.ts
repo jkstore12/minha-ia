@@ -1,3 +1,6 @@
+import { lookup } from "node:dns/promises";
+import { BlockList, isIP } from "node:net";
+import type { LookupAddress, LookupAllOptions } from "node:dns";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 
 type ActionContext = {
@@ -37,6 +40,14 @@ async function readUrl(url: string) {
 
   if (!["http:", "https:"].includes(parsedUrl.protocol) || isBlockedHost(parsedUrl.hostname)) {
     return `Não li ${url}: endereço bloqueado por segurança.`;
+  }
+
+  // DNS rebinding mitigation: resolver o hostname e validar que nenhum IP
+  // retornado cai na blocklist. Sem isso, attacker.example.com pode
+  // resolver para 127.0.0.1 em runtime e passar pela checagem por hostname.
+  const addressCheck = await resolveAndCheckAddress(parsedUrl.hostname);
+  if (!addressCheck.ok) {
+    return `Não li ${url}: endereço bloqueado por segurança (${addressCheck.reason}).`;
   }
 
   const controller = new AbortController();
@@ -88,6 +99,100 @@ export function isBlockedHost(hostname: string) {
     /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
     host.startsWith("169.254.")
   );
+}
+
+// BlockList global com as faixas privadas/reservadas. Reutilizado em
+// todas as chamadas para evitar recriar a estrutura.
+const PRIVATE_BLOCK_LIST = new BlockList();
+PRIVATE_BLOCK_LIST.addSubnet("0.0.0.0", 8, "ipv4"); // this network
+PRIVATE_BLOCK_LIST.addSubnet("127.0.0.0", 8, "ipv4"); // loopback
+PRIVATE_BLOCK_LIST.addSubnet("10.0.0.0", 8, "ipv4"); // RFC1918
+PRIVATE_BLOCK_LIST.addSubnet("172.16.0.0", 12, "ipv4"); // RFC1918
+PRIVATE_BLOCK_LIST.addSubnet("192.168.0.0", 16, "ipv4"); // RFC1918
+PRIVATE_BLOCK_LIST.addSubnet("169.254.0.0", 16, "ipv4"); // link-local
+PRIVATE_BLOCK_LIST.addSubnet("100.64.0.0", 10, "ipv4"); // CGNAT
+PRIVATE_BLOCK_LIST.addSubnet("224.0.0.0", 4, "ipv4"); // multicast
+PRIVATE_BLOCK_LIST.addSubnet("240.0.0.0", 4, "ipv4"); // reservado
+PRIVATE_BLOCK_LIST.addAddress("::1", "ipv6"); // loopback (unica)
+PRIVATE_BLOCK_LIST.addAddress("::", "ipv6"); // unspecified
+PRIVATE_BLOCK_LIST.addSubnet("fc00::", 7, "ipv6"); // ULA
+PRIVATE_BLOCK_LIST.addSubnet("fe80::", 10, "ipv6"); // link-local
+PRIVATE_BLOCK_LIST.addSubnet("ff00::", 8, "ipv6"); // multicast
+
+// IPv4 e IPv6 — checa se o endereco e privado/reservado/loopback.
+// Usa `node:net` BlockList com as faixas oficiais. Default-deny para
+// enderecos nao classificados.
+export function isBlockedAddress(address: string): boolean {
+  const addr = address.toLowerCase().trim();
+  if (!addr) return true;
+
+  const version = isIP(addr);
+  if (version === 0) return true; // nao e IP valido
+
+  // IPv4-mapped IPv6: extrair e checar o IPv4 correspondente.
+  if (version === 6 && addr.startsWith("::ffff:")) {
+    const v4 = addr.slice("::ffff:".length);
+    return isBlockedAddress(v4);
+  }
+
+  try {
+    if (PRIVATE_BLOCK_LIST.check(addr, version === 4 ? "ipv4" : "ipv6")) {
+      return true;
+    }
+  } catch {
+    return true; // endereco malformado para a BlockList = bloquear
+  }
+
+  return false;
+}
+
+export type AddressCheckResult =
+  | { ok: true; addresses: string[] }
+  | { ok: false; reason: string };
+
+// Tipo da funcao lookup (simplificado) — em testes injetamos um mock.
+// Inclui `signal` mesmo que LookupAllOptions nao o exponha no tipo,
+// porque em runtime o node o passa.
+export type LookupFn = (hostname: string, options: LookupAllOptions & { signal?: AbortSignal }) => Promise<LookupAddress[]>;
+
+// lookupOverride permite injetar um mock de dns.promises.lookup nos testes.
+export async function resolveAndCheckAddress(
+  hostname: string,
+  options: { timeoutMs?: number; lookupOverride?: LookupFn } = {},
+): Promise<AddressCheckResult> {
+  const timeoutMs = options.timeoutMs ?? 2000;
+
+  const timeoutController = new AbortController();
+  const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
+
+  const lookupImpl: LookupFn = options.lookupOverride ?? (async (host, opts) => {
+    const result = await lookup(host, opts);
+    return result as LookupAddress[];
+  });
+
+  try {
+    const records = await lookupImpl(hostname, {
+      all: true,
+      verbatim: true,
+      signal: timeoutController.signal,
+    } as LookupAllOptions);
+    const addresses = (records || []).map((r) => r.address).filter(Boolean);
+    if (addresses.length === 0) {
+      return { ok: false, reason: "DNS nao retornou enderecos" };
+    }
+    for (const address of addresses) {
+      if (isBlockedAddress(address)) {
+        return { ok: false, reason: `IP ${address} em faixa bloqueada` };
+      }
+    }
+    return { ok: true, addresses };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "falha de DNS";
+    // Fail-closed: sem DNS, sem acesso.
+    return { ok: false, reason: `DNS lookup falhou (${reason})` };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function normalizeText(text: string) {
