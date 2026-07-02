@@ -246,6 +246,12 @@ Verifique que `NEXT_PUBLIC_SUPABASE_URL` e `NEXT_PUBLIC_SUPABASE_ANON_KEY` estã
 ### "IA nao configurada"
 Verifique que `AI_API_KEY` (ou `OPENAI_API_KEY` / `OPENROUTER_API_KEY`) e `AI_MODEL` estão setadas.
 
+## 11. Ponte Local (opcional)
+
+A ponte local permite que o agente execute acoes sensiveis (acesso a arquivos, execucao de comandos) na sua maquina, com aprovacao por acao. Util quando voce quer que o agente faca coisas como editar codigo local, ler PDFs grandes, ou rodar comandos no terminal.
+
+Veja [docs/local-agent-bridge.md](docs/local-agent-bridge.md) para setup completo (cloudflared tunnel, tokens, seguranca).
+
 ### "Webhook nao autorizado" (Telegram)
 `TELEGRAM_WEBHOOK_SECRET` no `.env.local` e no registro do webhook devem bater exatamente.
 

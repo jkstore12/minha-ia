@@ -1,0 +1,39 @@
+# CODEOWNERS
+#
+# Define quem deve revisar automaticamente quando arquivos
+# correspondentes sao modificados em PRs. GitHub designa o
+# CODEOWNER mais antigo na lista como revisor automatico.
+#
+# Documentacao: https://docs.github.com/pt/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Para ativar code review obrigatorio por CODEOWNERS:
+# 1. Settings -> Branches -> Branch protection rules -> main
+# 2. Require a pull request before merging -> HABILITADO
+# 3. Require review from Code Owners -> HABILITADO
+
+# Default: maintainer principal revisa tudo.
+/*                                    @jkstore12
+
+# Seguranca — revisao obrigatoria para mudancas em auth, secrets, webhooks
+/.github/workflows/                  @jkstore12
+/DEPLOY.md                           @jkstore12
+/SECURITY.md                         @jkstore12
+/supabase/migrations/                @jkstore12
+/src/lib/cron-auth.ts                @jkstore12
+/src/lib/log.ts                      @jkstore12
+/src/app/api/auth/                   @jkstore12
+/src/app/api/attachments/            @jkstore12
+/src/app/api/cron/                   @jkstore12
+/src/app/api/health/route.ts         @jkstore12
+/api/webhook-telegram.js             @jkstore12
+/api/webhook-whatsapp.js             @jkstore12
+
+# AI / brain — revisao para mudancas no prompt e no fluxo de IA
+/src/lib/ai/                         @jkstore12
+/src/lib/agent/                      @jkstore12
+/src/lib/agent-tools/                @jkstore12
+/src/lib/orchestrator/               @jkstore12
+
+# Documentacao — pode ser revisada por qualquer contribuidor
+# (GitHub nao exige CODEOWNER match se a regra e mais permissiva)
+/*.md                                @jkstore12

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "Discussions / Q&A"
+    url: https://github.com/jkstore12/minha-ia/discussions
+    about: "Para perguntas gerais, ideias, ou discussao aberta."
+  - name: "Security Advisory (vulnerabilidades)"
+    url: https://github.com/jkstore12/minha-ia/security/advisories/new
+    about: "Reporte vulnerabilidades de forma privada. Veja SECURITY.md."

@@ -198,10 +198,21 @@ O historico recente e mantido por `chat.id` durante a sessao ativa da funcao ser
 - `src/components/chat/chat-shell.tsx`: interface principal.
 - `supabase/setup.sql`: setup completo do banco, indices e RLS.
 
+## Documentos Relacionados
+
+- [DEPLOY.md](./DEPLOY.md) — guia de deploy (Vercel, Supabase, Telegram, WhatsApp, troubleshooting).
+- [AGENTS.md](./AGENTS.md) — notas para agentes de IA que editam o codigo (breaking changes do Next.js).
+- [docs/local-agent-bridge.md](./docs/local-agent-bridge.md) — ponte local para acoes sensiveis (cloudflared, seguranca).
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — setup de dev, PR process, code style.
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — topologia do sistema, fluxo de dados, integracoes.
+- [SECURITY.md](./SECURITY.md) — politica de divulgacao de vulnerabilidades.
+- `docs/adr/` — Architecture Decision Records (por que X em vez de Y).
+
 ## Verificacao
 
 ```bash
 npm run typecheck
 npm run lint
+npm test
 npm run build
 ```

@@ -1,0 +1,63 @@
+name: "✨ Feature Request"
+description: Sugira uma nova feature ou melhoria
+title: "[FEATURE] "
+labels: ["enhancement", "triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Antes de abrir, verifique:
+        - [ ] Nao existe um issue ou PR similar aberto
+        - [ ] A feature esta alinhada com a visao do projeto (veja [README.md](../../README.md))
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problema que isso resolve"
+      description: Que dor ou limitacao o usuario sente hoje? Por que essa feature e necessaria?
+      placeholder: "Ex: Hoje, quando tenho mais de 10 conversas, o scroll infinito fica lento..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: "Solucao proposta"
+      description: Como voce imagina que a feature funcionaria? Inclua mocks / wireframes se possivel.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternativas consideradas"
+      description: Que outras abordagens voce pensou? Por que esta e a melhor?
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: "Escopo estimado"
+      description: Quais areas do codigo seriao afetadas? (ex: so frontend, requer migration, requer novo webhook, etc)
+    validations:
+      required: false
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: "Prioridade percebida"
+      options:
+        - "Bloqueante (sem isso o produto nao funciona)"
+        - "Alta (impacto grande, muitos usuarios se beneficiariam)"
+        - "Media (nice to have, alguns usuarios se beneficiariam)"
+        - "Baixa (cosmetic ou edge case)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: "Contexto adicional"
+      description: Screenshots, links para discussoes anteriores, etc.

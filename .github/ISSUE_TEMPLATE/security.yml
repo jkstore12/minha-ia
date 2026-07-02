@@ -1,0 +1,62 @@
+name: "🔒 Security Issue"
+description: Reporte uma vulnerabilidade ou preocupacao de seguranca
+title: "[SECURITY] "
+labels: ["security", "triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## ATENCAO
+
+        Se voce descobriu uma **vulnerabilidade exploravel** (RCE, auth bypass, data leak, etc), **NAO** use este template. Reporte diretamente via canal privado descrito em [SECURITY.md](../../SECURITY.md) para que possamos corrigir antes da divulgacao publica.
+
+        Use este template para:
+        - Preocupacoes de seguranca que nao sao exploraveis imediatamente
+        - Sugestoes de hardening
+        - Perguntas sobre configuracao segura
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: "Tipo"
+      options:
+        - "Preocupacao com codigo (logica)"
+        - "Configuracao recomendada (env vars, headers)"
+        - "Dependencia com vulnerabilidade conhecida"
+        - "Hardening suggestion"
+        - "Outro"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: "Descricao"
+      description: O que voce encontrou. Inclua arquivo/linha quando aplicavel.
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: "Impacto potencial"
+      description: O que um atacante poderia fazer? Quais dados estao em risco?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: "Passos para reproduzir / validar"
+      description: Como verificar a preocupacao. Apenas se aplicavel.
+    validations:
+      required: false
+
+  - type: textarea
+    id: suggested
+    attributes:
+      label: "Sugestao de correcao (opcional)"
+      description: Como voce proporia corrigir?
+    validations:
+      required: false
