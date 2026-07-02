@@ -10,6 +10,113 @@ const WHATSAPP_IMAGE_MODELS = ["openai/gpt-4o", "~anthropic/claude-sonnet-latest
 const DEFAULT_OUT_OF_HOURS_MESSAGE = "Oi! Estou ocupado agora, mas retorno assim que puder.";
 const REMINDER_ACK_SNOOZE_MINUTES = 5;
 
+// Logger estruturado minimo, autocontido. Em producao emite JSON em
+// uma linha; em dev texto colorido. Aplica PII redaction basica em
+// `body`, `text`, `chat_id`, `phone`, `from`, `caption`, `message` e
+// chaves de token (`authorization`, `apikey`, `x-api-key`).
+const PII_KEYS = new Set([
+  "body",
+  "text",
+  "chat_id",
+  "chatid",
+  "message_id",
+  "messageid",
+  "from",
+  "phone",
+  "phonenumber",
+  "number",
+  "remote_jid",
+  "remotejid",
+  "sender",
+  "first_name",
+  "last_name",
+  "username",
+  "caption",
+  "raw_text",
+  "content",
+  "authorization",
+  "apikey",
+  "x-api-key",
+]);
+
+function redactPII(value) {
+  if (value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.map(redactPII);
+  if (typeof value !== "object") return value;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    out[k] = PII_KEYS.has(k.toLowerCase()) ? "[REDACTED]" : redactPII(v);
+  }
+  return out;
+}
+
+const whatsappLogger = {
+  scope: "whatsapp-webhook",
+  debug() {},
+  info(message, meta) {
+    emit(this.scope, "info", message, meta);
+  },
+  warn(message, meta) {
+    emit(this.scope, "warn", message, meta);
+  },
+  error(message, meta) {
+    emit(this.scope, "error", message, meta);
+  },
+};
+
+function emit(scope, level, message, meta) {
+  const safe = meta ? redactPII(meta) : {};
+  if (process.env.NODE_ENV === "production") {
+    process.stdout.write(JSON.stringify({
+      ts: new Date().toISOString(),
+      level,
+      scope,
+      msg: message,
+      ...(Object.keys(safe).length ? { meta: safe } : {}),
+    }) + "\n");
+    return;
+  }
+  const color = level === "error" ? "\x1b[31m" : level === "warn" ? "\x1b[33m" : "\x1b[34m";
+  const reset = "\x1b[0m";
+  const metaStr = Object.keys(safe).length ? ` \x1b[2m${JSON.stringify(safe)}\x1b[0m` : "";
+  console.log(`${color}${level.toUpperCase().padEnd(5)}${reset} ${scope} ${message}${metaStr}`);
+}
+
+function timingSafeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+// Verificacao de segredo do webhook WhatsApp. Evolution API nao envia
+// um header padrao, entao o operador precisa injetar o secret por um
+// reverse proxy (Caddy/Nginx) ou pelo cabecalho customizado da propria
+// Evolution (configuracao por instancia). Aceita tanto o header
+// `x-webhook-secret` quanto o query param `?secret=...` para dar
+// flexibilidade de deploy.
+function isWhatsappWebhookAuthorized(req) {
+  const expected = process.env.WHATSAPP_WEBHOOK_SECRET;
+  // Fail-closed: sem secret configurada, nao atende.
+  if (!expected) return false;
+
+  const headerValue = req.headers?.["x-webhook-secret"];
+  if (typeof headerValue === "string" && timingSafeEqual(headerValue, expected)) {
+    return true;
+  }
+
+  try {
+    const url = new URL(req.url, "http://localhost");
+    const queryValue = url.searchParams.get("secret");
+    if (queryValue && timingSafeEqual(queryValue, expected)) return true;
+  } catch {
+    // url invalida cai abaixo
+  }
+
+  return false;
+}
+
 export const config = {
   api: {
     bodyParser: {
@@ -107,7 +214,7 @@ async function supabaseServiceGet(path) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    console.error("whatsapp supabase service error", response.status, payload);
+    whatsappLogger.error("whatsapp supabase service error", { status: response.status, payload });
     return null;
   }
   return payload;
@@ -130,7 +237,7 @@ async function supabaseServicePatch(path, body) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    console.error("whatsapp supabase patch error", response.status, payload);
+    whatsappLogger.error("whatsapp supabase patch error", { status: response.status, payload });
     return null;
   }
   return payload;
@@ -153,7 +260,7 @@ async function supabaseServicePost(path, body) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    console.error("whatsapp supabase post error", response.status, payload);
+    whatsappLogger.error("whatsapp supabase post error", { status: response.status, payload });
     return null;
   }
   return payload;
@@ -1410,7 +1517,7 @@ async function askOpenRouterWithVision({ req, chatId, userName, caption, imageDa
       return answer;
     } catch (error) {
       lastError = error;
-      console.error("whatsapp image model error", model, error);
+      whatsappLogger.error("whatsapp image model error", { model, error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -1587,7 +1694,7 @@ async function downloadWhatsAppMedia(parsed, maxBytes) {
       }),
     });
   } catch (error) {
-    console.error("whatsapp getBase64FromMediaMessage error", error);
+    whatsappLogger.error("whatsapp getBase64FromMediaMessage error", { error: error instanceof Error ? error.message : String(error) });
   }
 
   const fetchedBase64 = base64ToBuffer(extractMediaBase64(payload));
@@ -2184,6 +2291,18 @@ export default async function handler(req, res) {
     return res.status(405).json({ ok: false, error: "Método não permitido." });
   }
 
+  // Autorizacao do webhook. WHATSAPP_WEBHOOK_SECRET precisa estar
+  // configurado no Vercel; aceitamos o header `x-webhook-secret` ou o
+  // query param `?secret=...` para dar flexibilidade ao reverse proxy
+  // ou a Evolution API.
+  if (!isWhatsappWebhookAuthorized(req)) {
+    whatsappLogger.warn("webhook.unauthorized", { reason: !process.env.WHATSAPP_WEBHOOK_SECRET ? "secret-not-set" : "secret-mismatch" });
+    if (!process.env.WHATSAPP_WEBHOOK_SECRET) {
+      return res.status(503).json({ ok: false, error: "Webhook secret nao configurado." });
+    }
+    return res.status(401).json({ ok: false, error: "Webhook nao autorizado." });
+  }
+
   const update = parseBody(req.body);
   const parsed = normalizeWhatsAppPayload(update);
 
@@ -2350,11 +2469,11 @@ export default async function handler(req, res) {
     await sendWhatsAppText(parsed.number, answer);
     return res.status(200).json({ ok: true });
   } catch (error) {
-    console.error("whatsapp webhook error", error);
+    whatsappLogger.error("whatsapp webhook error", { error: error instanceof Error ? error.message : String(error) });
     try {
       await sendWhatsAppText(parsed.number, "Desculpa, não consegui responder agora. Tente novamente em alguns instantes.");
     } catch (sendError) {
-      console.error("whatsapp fallback send error", sendError);
+      whatsappLogger.error("whatsapp fallback send error", { error: sendError instanceof Error ? sendError.message : String(sendError) });
     }
     return res.status(200).json({ ok: true, handledWithFallback: true });
   }

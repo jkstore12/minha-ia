@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { isCronAuthorized } from "@/lib/cron-auth";
 
 export const runtime = "nodejs";
 
@@ -27,12 +28,6 @@ type ReminderTask = {
 
 const DEFAULT_EVOLUTION_API_URL = "https://evolution-api-production-d8ba.up.railway.app";
 const DEFAULT_ACK_SNOOZE_MINUTES = 5;
-
-function isAuthorized(request: Request) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true;
-  return request.headers.get("authorization") === `Bearer ${secret}`;
-}
 
 function getSupabaseAdmin() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -258,8 +253,11 @@ function buildAfterDeliveryPatch(task: ReminderTask, deliverySent: boolean, deli
 }
 
 export async function GET(request: Request) {
-  if (!isAuthorized(request)) {
-    return NextResponse.json({ ok: false, error: "Não autorizado." }, { status: 401 });
+  if (!isCronAuthorized(request)) {
+    return NextResponse.json(
+      { ok: false, error: "Não autorizado. Configure CRON_SECRET e envie Authorization: Bearer <secret>." },
+      { status: 401 },
+    );
   }
 
   if (process.env.REMINDERS_CRON_ENABLED === "false") {

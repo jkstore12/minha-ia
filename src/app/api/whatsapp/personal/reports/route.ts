@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { isCronAuthorized } from "@/lib/cron-auth";
 
 export const runtime = "nodejs";
 
@@ -17,12 +18,6 @@ function getSupabaseConfig() {
     serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
     ownerUserId: process.env.WHATSAPP_OWNER_USER_ID || "",
   };
-}
-
-function isAuthorized(request: Request) {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return true;
-  return request.headers.get("authorization") === `Bearer ${secret}`;
 }
 
 function fortalezaDayStartIso() {
@@ -116,8 +111,11 @@ async function sendTelegram(text: string) {
 }
 
 export async function GET(request: Request) {
-  if (!isAuthorized(request)) {
-    return NextResponse.json({ ok: false, error: "Não autorizado." }, { status: 401 });
+  if (!isCronAuthorized(request)) {
+    return NextResponse.json(
+      { ok: false, error: "Não autorizado. Configure CRON_SECRET e envie Authorization: Bearer <secret>." },
+      { status: 401 },
+    );
   }
 
   const url = new URL(request.url);
