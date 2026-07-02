@@ -1,6 +1,66 @@
 const MAX_HISTORY_MESSAGES = 20;
 const SESSION_TTL_MS = 1000 * 60 * 60 * 6;
 const UPDATE_DEDUPE_TTL_MS = 3000;
+const TELEGRAM_PII_KEYS = new Set([
+  "body",
+  "text",
+  "chat_id",
+  "chatid",
+  "message_id",
+  "messageid",
+  "from",
+  "phone",
+  "phonenumber",
+  "number",
+  "remote_jid",
+  "remotejid",
+  "sender",
+  "first_name",
+  "last_name",
+  "username",
+  "caption",
+  "raw_text",
+  "content",
+  "authorization",
+  "apikey",
+  "x-api-key",
+]);
+
+function telegramRedactPII(value) {
+  if (value === null || value === undefined) return value;
+  if (Array.isArray(value)) return value.map(telegramRedactPII);
+  if (typeof value !== "object") return value;
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    out[k] = TELEGRAM_PII_KEYS.has(k.toLowerCase()) ? "[REDACTED]" : telegramRedactPII(v);
+  }
+  return out;
+}
+
+function telegramLogEmit(level, message, meta) {
+  const safe = meta ? telegramRedactPII(meta) : {};
+  if (process.env.NODE_ENV === "production") {
+    process.stdout.write(JSON.stringify({
+      ts: new Date().toISOString(),
+      level,
+      scope: "telegram-webhook",
+      msg: message,
+      ...(Object.keys(safe).length ? { meta: safe } : {}),
+    }) + "\n");
+    return;
+  }
+  const color = level === "error" ? "\x1b[31m" : level === "warn" ? "\x1b[33m" : "\x1b[34m";
+  const reset = "\x1b[0m";
+  const metaStr = Object.keys(safe).length ? ` \x1b[2m${JSON.stringify(safe)}\x1b[0m` : "";
+  console.log(`${color}${level.toUpperCase().padEnd(5)}${reset} telegram-webhook ${message}${metaStr}`);
+}
+
+const telegramLogger = {
+  debug() {},
+  info: (msg, meta) => telegramLogEmit("info", msg, meta),
+  warn: (msg, meta) => telegramLogEmit("warn", msg, meta),
+  error: (msg, meta) => telegramLogEmit("error", msg, meta),
+};
 const MAX_TELEGRAM_AUDIO_BYTES = 20 * 1024 * 1024;
 const MAX_TELEGRAM_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_TELEGRAM_PDF_BYTES = 20 * 1024 * 1024;
@@ -172,7 +232,7 @@ async function supabaseOwnerGet(path) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    console.error("telegram personal report supabase error", response.status, payload);
+    telegramLogger.error("telegram personal report supabase error", { status: response.status, payload });
     return null;
   }
   return payload;
@@ -195,7 +255,7 @@ async function supabaseOwnerPost(path, body) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    console.error("telegram supabase post error", response.status, payload);
+    telegramLogger.error("telegram supabase post error", { status: response.status, payload });
     return null;
   }
   return payload;
@@ -218,7 +278,7 @@ async function supabaseOwnerPatch(path, body) {
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    console.error("telegram supabase patch error", response.status, payload);
+    telegramLogger.error("telegram supabase patch error", { status: response.status, payload });
     return null;
   }
   return payload;
@@ -1718,7 +1778,7 @@ async function askOpenRouter({ req, chatId, userName, text, modelOverride, webSe
       }),
     }, Number(process.env.TELEGRAM_OPENROUTER_TIMEOUT_MS || 7000)).catch((error) => {
       lastError = error;
-      console.error("telegram openrouter timeout/network error", model, error);
+      telegramLogger.error("telegram openrouter timeout/network error", { model, error: error instanceof Error ? error.message : String(error) });
       return null;
     });
 
@@ -1728,14 +1788,14 @@ async function askOpenRouter({ req, chatId, userName, text, modelOverride, webSe
 
     if (!response.ok) {
       lastError = new Error(payload?.error?.message || `OpenRouter não conseguiu responder com ${model}.`);
-      console.error("telegram openrouter model error", model, lastError);
+      telegramLogger.error("telegram openrouter model error", { model, error: lastError instanceof Error ? lastError.message : String(lastError) });
       continue;
     }
 
     let answer = String(payload?.choices?.[0]?.message?.content || "").trim();
     if (!answer) {
       lastError = new Error(`O modelo ${model} retornou uma resposta vazia.`);
-      console.error("telegram openrouter empty answer", model);
+      telegramLogger.error("telegram openrouter empty answer", { model });
       continue;
     }
 
@@ -1845,7 +1905,7 @@ async function askOpenRouterWithVision({ req, chatId, userName, caption, imageDa
       return { answer, model };
     } catch (error) {
       lastError = error;
-      console.error("telegram image model error", model, error);
+      telegramLogger.error("telegram image model error", { model, error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -2029,7 +2089,7 @@ async function handleTelegramAudio({ req, audio }) {
             .join("\n"),
         });
     } catch (searchError) {
-      console.error("telegram audio web search error", searchError);
+      telegramLogger.error("telegram audio web search error", { error: searchError instanceof Error ? searchError.message : String(searchError) });
       answer = await askFromTranscribedAudio({
         req,
         chatId: audio.chatId,
@@ -2435,7 +2495,7 @@ async function sendTelegramMessage(chatId, text) {
         disable_web_page_preview: false,
       });
     } catch (error) {
-      console.error("telegram html send error, retrying plain text", error);
+      telegramLogger.error("telegram html send error, retrying plain text", { error: error instanceof Error ? error.message : String(error) });
       await sendTelegramPayload("sendMessage", {
         chat_id: chatId,
         text: chunk,
@@ -2581,7 +2641,7 @@ export default async function handler(req, res) {
       await sendTelegramMessage(callbackQuery.chatId, result.text);
       return res.status(200).json({ ok: true, callback: true });
     } catch (error) {
-      console.error("telegram callback error", error);
+      telegramLogger.error("telegram callback error", { error: error instanceof Error ? error.message : String(error) });
       await answerCallbackQuery(callbackQuery.id, "Não consegui trocar agora.");
       return res.status(200).json({ ok: true, callbackHandledWithFallback: true });
     }
@@ -2600,7 +2660,7 @@ export default async function handler(req, res) {
       await handleTelegramAudio({ req, audio });
       return res.status(200).json({ ok: true, audio: true });
     } catch (error) {
-      console.error("telegram audio error", error);
+      telegramLogger.error("telegram audio error", { error: error instanceof Error ? error.message : String(error) });
       await sendTelegramMessage(
         audio.chatId,
         "Recebi seu áudio, mas não consegui processar agora. Verifique a conexão do provedor de IA ou tente reenviar.",
@@ -2618,7 +2678,7 @@ export default async function handler(req, res) {
       await handleTelegramPhoto({ req, photo });
       return res.status(200).json({ ok: true, photo: true });
     } catch (error) {
-      console.error("telegram photo error", error);
+      telegramLogger.error("telegram photo error", { error: error instanceof Error ? error.message : String(error) });
       await sendTelegramMessage(
         photo.chatId,
         "Recebi sua imagem, mas não consegui analisar agora. Tente reenviar a foto ou enviar uma versão menor.",
@@ -2632,7 +2692,7 @@ export default async function handler(req, res) {
       await handleTelegramPdf({ req, pdf });
       return res.status(200).json({ ok: true, pdf: true });
     } catch (error) {
-      console.error("telegram pdf error", error);
+      telegramLogger.error("telegram pdf error", { error: error instanceof Error ? error.message : String(error) });
       await sendTelegramMessage(
         pdf.chatId,
         "Recebi seu PDF, mas não consegui processar agora. Tente reenviar o arquivo ou enviar um PDF menor.",
@@ -2757,7 +2817,7 @@ export default async function handler(req, res) {
       try {
         answer = await askOpenRouterWithRealtimeSearch({ req, ...parsed, text: searchPrompt });
       } catch (searchError) {
-        console.error("telegram web search error", searchError);
+        telegramLogger.error("telegram web search error", { error: searchError instanceof Error ? searchError.message : String(searchError) });
         answer = await askOpenRouter({ req, ...parsed });
         answer = `Não consegui concluir a pesquisa na internet agora, entao respondi com o modelo ativo.\n\n${answer}`;
       }
@@ -2770,7 +2830,7 @@ export default async function handler(req, res) {
     await sendTelegramMessage(parsed.chatId, answer);
     return res.status(200).json({ ok: true });
   } catch (error) {
-    console.error("telegram webhook error", {
+    telegramLogger.error("telegram webhook error", {
       name: error?.name,
       message: error?.message,
       stack: error?.stack,
@@ -2782,7 +2842,7 @@ export default async function handler(req, res) {
         "Desculpa, não consegui responder agora. Tente novamente em alguns instantes.",
       );
     } catch (sendError) {
-      console.error("telegram fallback send error", sendError);
+      telegramLogger.error("telegram fallback send error", { error: sendError instanceof Error ? sendError.message : String(sendError) });
     }
 
     return res.status(200).json({ ok: true, handledWithFallback: true });

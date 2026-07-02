@@ -16,12 +16,24 @@ import {
 } from "@/lib/chat/attachments";
 import { env, hasAiEnv, hasSupabaseEnv } from "@/lib/env";
 import { consume as consumeRateLimit } from "@/lib/rate-limit";
+import { createLogger, extractOrCreateRequestId } from "@/lib/log";
 import { createClient } from "@/lib/supabase/server";
 import { parseUserPreferences } from "@/lib/user-preferences";
 import { truncateTitle } from "@/lib/utils";
 
 const ONE_MINUTE_MS = 60 * 1000;
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+function withRequestId<T extends Response>(response: T, requestId: string): T {
+  response.headers.set("x-request-id", requestId);
+  return response;
+}
+
+function jsonWithRequestId(body: unknown, init: ResponseInit | undefined, requestId: string): NextResponse {
+  const response = NextResponse.json(body, init);
+  response.headers.set("x-request-id", requestId);
+  return response;
+}
 
 export const runtime = "nodejs";
 
@@ -157,20 +169,28 @@ async function prepareAttachments(
 }
 
 export async function POST(request: Request) {
+  const requestId = extractOrCreateRequestId(request);
+  const logger = createLogger("chat", requestId);
+
   if (!hasSupabaseEnv()) {
-    return NextResponse.json({ error: "Supabase não configurado." }, { status: 503 });
+    return withRequestId(NextResponse.json({ error: "Supabase não configurado." }, { status: 503 }), requestId);
   }
 
   if (!hasAiEnv()) {
-    return NextResponse.json(
-      { error: "IA não configurada. Defina AI_API_KEY, OPENAI_API_KEY ou OPENROUTER_API_KEY em .env.local." },
-      { status: 503 },
+    return withRequestId(
+      NextResponse.json(
+        { error: "IA não configurada. Defina AI_API_KEY, OPENAI_API_KEY ou OPENROUTER_API_KEY em .env.local." },
+        { status: 503 },
+      ),
+      requestId,
     );
   }
 
+  logger.info("chat.received", { messageBytes: request.headers.get("content-length") ?? "unknown" });
+
   const parsed = ChatRequest.safeParse(await request.json().catch(() => null));
   if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.issues[0]?.message || "Entrada inválida." }, { status: 400 });
+    return jsonWithRequestId({ error: parsed.error.issues[0]?.message || "Entrada inválida." }, { status: 400 }, requestId);
   }
 
   const supabase = await createClient();
@@ -180,7 +200,7 @@ export async function POST(request: Request) {
   } = await supabase.auth.getUser();
 
   if (userError || !user) {
-    return NextResponse.json({ error: "Sessão expirada. Entre novamente." }, { status: 401 });
+    return jsonWithRequestId({ error: "Sessão expirada. Entre novamente." }, { status: 401 }, requestId);
   }
 
   // Rate limit por usuario. Bloqueia abuso antes de qualquer chamada
@@ -189,7 +209,7 @@ export async function POST(request: Request) {
   // estiver setado, senao cai para in-memory.
   const perMinute = await consumeRateLimit(`chat:user:${user.id}`, env.chatRateLimitPerMinute, ONE_MINUTE_MS);
   if (!perMinute.allowed) {
-    return NextResponse.json(
+    return jsonWithRequestId(
       { error: "Muitas mensagens em pouco tempo. Aguarde um instante." },
       {
         status: 429,
@@ -200,12 +220,13 @@ export async function POST(request: Request) {
           "X-RateLimit-Reset": String(Math.ceil(perMinute.resetMs / 1000)),
         },
       },
+      requestId,
     );
   }
 
   const perDay = await consumeRateLimit(`chat:user:${user.id}:day`, env.chatRateLimitPerDay, ONE_DAY_MS);
   if (!perDay.allowed) {
-    return NextResponse.json(
+    return jsonWithRequestId(
       { error: "Limite diario de mensagens atingido." },
       {
         status: 429,
@@ -216,6 +237,7 @@ export async function POST(request: Request) {
           "X-RateLimit-Reset": String(Math.ceil(perDay.resetMs / 1000)),
         },
       },
+      requestId,
     );
   }
 
@@ -237,7 +259,7 @@ export async function POST(request: Request) {
   try {
     preparedAttachments = attachments.length ? await prepareAttachments(supabase, user.id, attachments) : [];
   } catch {
-    return NextResponse.json({ error: "Não foi possível preparar os anexos enviados." }, { status: 400 });
+    return jsonWithRequestId({ error: "Não foi possível preparar os anexos enviados." }, { status: 400 }, requestId);
   }
 
   const audioTranscriptions = preparedAttachments
@@ -253,13 +275,14 @@ export async function POST(request: Request) {
   );
 
   if (failedAudioTranscriptions.length) {
-    return NextResponse.json(
+    return jsonWithRequestId(
       {
         error:
           failedAudioTranscriptions[0]?.transcriptionError ||
           "Recebi seu áudio, mas não consegui transcrever agora. Tente reenviar ou envie um arquivo menor.",
       },
       { status: 400 },
+      requestId,
     );
   }
 
@@ -291,7 +314,7 @@ export async function POST(request: Request) {
       .single();
 
     if (error || !conversation) {
-      return NextResponse.json({ error: "Conversa não encontrada." }, { status: 404 });
+      return jsonWithRequestId({ error: "Conversa não encontrada." }, { status: 404 }, requestId);
     }
 
     conversationSummary = conversation.summary;
@@ -303,7 +326,7 @@ export async function POST(request: Request) {
       .single();
 
     if (error || !conversation) {
-      return NextResponse.json({ error: "Não foi possível criar a conversa." }, { status: 500 });
+      return jsonWithRequestId({ error: "Não foi possível criar a conversa." }, { status: 500 }, requestId);
     }
 
     conversationId = conversation.id;
@@ -346,7 +369,7 @@ export async function POST(request: Request) {
     .single();
 
   if (userMessageError || !userMessage) {
-    return NextResponse.json({ error: "Não foi possível salvar sua mensagem." }, { status: 500 });
+    return jsonWithRequestId({ error: "Não foi possível salvar sua mensagem." }, { status: 500 }, requestId);
   }
 
   if (attachments.length) {
@@ -364,7 +387,7 @@ export async function POST(request: Request) {
     );
 
     if (attachmentInsertError) {
-      return NextResponse.json({ error: "Não foi possível salvar os anexos da mensagem." }, { status: 500 });
+      return jsonWithRequestId({ error: "Não foi possível salvar os anexos da mensagem." }, { status: 500 }, requestId);
     }
   }
 
@@ -456,7 +479,7 @@ export async function POST(request: Request) {
         model_attempts: modelAttempts,
       },
     });
-    return NextResponse.json({ error: "A IA não conseguiu responder agora. Verifique provedor, chave e modelo." }, { status: 502 });
+    return jsonWithRequestId({ error: "A IA não conseguiu responder agora. Verifique provedor, chave e modelo." }, { status: 502 }, requestId);
   }
 
   if (!assistantMessage) {
@@ -475,7 +498,7 @@ export async function POST(request: Request) {
   });
 
   if (assistantMessageError) {
-    return NextResponse.json({ error: "Não foi possível salvar a resposta da IA." }, { status: 500 });
+    return jsonWithRequestId({ error: "Não foi possível salvar a resposta da IA." }, { status: 500 }, requestId);
   }
 
   const finalConversationId = conversationId;
@@ -550,7 +573,16 @@ export async function POST(request: Request) {
     }
   });
 
-  return NextResponse.json({
+  logger.info("chat.completed", {
+    conversationId,
+    userId: user.id,
+    model: actualUsedModel,
+    fallbackUsed,
+    webSearch,
+    attachmentCount: attachments.length,
+  });
+
+  return jsonWithRequestId({
     conversationId,
     assistantMessage,
     model: actualUsedModel || model || userPreferences.preferredModel || env.aiModel,
@@ -561,5 +593,5 @@ export async function POST(request: Request) {
     modelAttempts,
     actionResults: actionResults.results,
     agentSteps: actionResults.steps,
-  });
+  }, undefined, requestId);
 }
