@@ -1,0 +1,46 @@
+name: gitleaks
+
+# Secret scanning. Roda em PRs (apenas no conteudo do PR) e em push
+# para main (history do branch ate a HEAD). Falha o job se encontrar
+# qualquer credencial exposta.
+#
+# Documentacao: https://github.com/gitleaks/gitleaks-action
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  scan:
+    name: Scan for secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Para PR: fetch do PR head para que o scanner veja o conteudo
+          # completo do PR. Para push: history do branch ate a HEAD.
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          # Habilita upload de findings como PR review comments.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACTS: true
+          GITLEAKS_ENABLE_SUMMARY: true
+
+      # Bloco abaixo: permite rodar gitleaks em PRs de forks (que nao tem
+      # acesso a secrets do repo). Sem isso, o push event falha em forks
+      # com "refusing to allow a GitHub App without permission to access
+      # content".
+      - name: Bump fetch-depth for fork PRs
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork
+        run: git fetch --depth=0 origin ${{ github.event.pull_request.head.sha }} || true

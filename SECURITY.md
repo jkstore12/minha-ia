@@ -74,6 +74,10 @@ Esta secao documenta as decisoes de seguranca que ja estao em producao, para ref
 - Substituiu `console.error` nos webhooks.
 - `Cache-Control: private, no-store` em downloads de anexos.
 
+### Secret Scanning
+- **gitleaks** em CI (`.github/workflows/gitleaks.yml`): bloqueia PRs com credenciais commitadas.
+- Config custom em `.gitleaks.toml` cobre OpenAI, OpenRouter, Anthropic, Supabase service_role, Telegram bot tokens, Evolution API, webhook secrets. Placeholders em `.env.example` estao na allowlist para evitar falsos positivos.
+
 ### Rate Limiting
 - 20 mensagens/min e 300 mensagens/dia por usuario (configuravel).
 - In-memory por padrao, Upstash Redis em prod multi-instancia.
@@ -95,11 +99,11 @@ Todas com prefixo `NEXT_PUBLIC_` sao embutidas no bundle do client e **publicas*
 ## Scope
 
 Em scope:
-- `src/` — codigo do app Next.js.
-- `api/` — Vercel serverless functions.
+- `src/` — codigo do app Next.js (incluindo `src/lib/webhooks/` com a logica dos webhooks).
 - `supabase/migrations/` — migrations do banco.
 - `scripts/` — scripts de setup.
 - Documentacao que induz usuarios a configuracao insegura (ex: `.env.example` com secrets placeholder).
+- CI workflows em `.github/workflows/`.
 
 Fora de scope:
 - Dependencias de terceiros (Supabase, OpenRouter, Evolution API, Vercel). Reporte para os respectivos mantenedores.

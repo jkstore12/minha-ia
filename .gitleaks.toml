@@ -1,0 +1,92 @@
+# gitleaks config — https://github.com/gitleaks/gitleaks/blob/master/config/gitleaks.toml
+#
+# Roda em PRs e push via .github/workflows/gitleaks.yml. Detecta credenciais
+# commitadas por engano (OpenAI, Supabase, GitHub PATs, etc) antes que
+# cheguem ao main.
+#
+# Custom rules alem das default:
+#   - Placeholders tipo "sk-XXXX", "sk-or-XXXX", "sk-ant-XXXX" que aparecem
+#     em .env.example nao sao flagged (allowlist abaixo).
+#   - SUPABASE_SERVICE_ROLE_KEY mesmo que pareca placeholder.
+#   - WEBHOOK_SECRET (CRON_SECRET, TELEGRAM_WEBHOOK_SECRET, etc) com mais
+#     de 20 chars (para evitar flag de "abc" em testes).
+
+title = "Minha IA gitleaks config"
+
+[extend]
+# Usa as regras default mais as customizadas abaixo.
+useDefault = true
+
+[allowlist]
+description = "Falsos positivos conhecidos"
+paths = [
+  # Exemplos com placeholders em docs.
+  '''\.env\.example$''',
+  '''\.env\.example\.md$''',
+  # Lockfile e artefatos gerados.
+  '''package-lock\.json$''',
+  '''pnpm-lock\.yaml$''',
+  '''yarn\.lock$''',
+  '''\.next/''',
+  # Documentos podem conter hashes de exemplo ou placeholders.
+  '''docs/adr/.*\.md$''',
+  # O proprio config do gitleaks (regex patterns).
+  '''\.gitleaks\.toml$''',
+  # Workflows podem mencionar nomes de secrets (sem o valor).
+  '''\.github/workflows/.*\.yml$''',
+  # Test fixtures podem usar keys fake.
+  '''__tests__/.*''',
+  '''__mocks__/.*''',
+]
+
+# Regras custom — projeto tem patterns proprios que o default nao pega.
+
+[[rules]]
+id = "minhaia-supabase-service-role"
+description = "Supabase service_role key (bypassa RLS, server-only)"
+regex = '''(?i)supabase[_-]?service[_-]?role[_-]?key['"\s:=]+(eyJ|sk-)'''
+keywords = ["supabase_service_role_key", "supabase-service-role-key"]
+tags = ["secret", "supabase"]
+
+[[rules]]
+id = "minhaia-openai-prod-key"
+description = "OpenAI / OpenRouter / Anthropic production key"
+regex = '''\b(sk-(or-|ant-)?)[A-Za-z0-9_-]{20,}\b'''
+keywords = ["sk-or-v1-", "sk-ant-", "sk-proj-"]
+tags = ["secret", "ai-provider"]
+# Permitir placeholders explicitos.
+[rules.allowlist]
+regexes = [
+  '''sk-(or-|ant-|proj-)?X{8,}''',
+  '''sk-(or-|ant-|proj-)?your[_-]?key[_-]?here''',
+  '''sk-(or-|ant-|proj-)?PLACEHOLDER''',
+]
+
+[[rules]]
+id = "minhaia-webhook-secret"
+description = "Webhook ou cron secret com valor de producao (>=20 chars, nao-placeholder)"
+regex = '''(?i)(TELEGRAM_WEBHOOK_SECRET|WHATSAPP_WEBHOOK_SECRET|CRON_SECRET)['"\s:=]+([A-Za-z0-9_\-]{20,})'''
+keywords = ["TELEGRAM_WEBHOOK_SECRET", "WHATSAPP_WEBHOOK_SECRET", "CRON_SECRET"]
+tags = ["secret", "webhook"]
+# Permitir placeholders curtos (de docs).
+[rules.allowlist]
+regexes = [
+  '''[A-Za-z0-9_\-]{0,8}''',
+  '''abc''',
+  '''dev[_-]?secret''',
+  '''your[_-]?secret[_-]?here''',
+]
+
+[[rules]]
+id = "minhaia-evolution-api-key"
+description = "Evolution API key (WhatsApp provider)"
+regex = '''(?i)EVOLUTION_API_KEY['"\s:=]+[A-Za-z0-9_\-]{16,}'''
+keywords = ["EVOLUTION_API_KEY"]
+tags = ["secret", "whatsapp"]
+
+[[rules]]
+id = "minhaia-telegram-bot-token"
+description = "Telegram bot token (numeric:alphanumeric)"
+regex = '''\b[0-9]{8,10}:AA[A-Za-z0-9_\-]{30,}\b'''
+keywords = [":"]
+tags = ["secret", "telegram"]

@@ -56,7 +56,7 @@ npm test
 - [ ] SSRF: DNS rebinding mitigation nao foi regredido
 - [ ] Health: scrubbing de provider/model mantido em shallow mode
 - [ ] PII redaction em logs nao foi regredido
-- [ ] Nenhuma secret commitada (verificar `git diff` cuidadosamente)
+- [ ] Nenhuma secret commitada (CI roda gitleaks; verificar `git diff` cuidadosamente)
 
 ### Observabilidade (se aplicavel)
 - [ ] `x-request-id` em responses de API

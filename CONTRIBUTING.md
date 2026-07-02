@@ -77,7 +77,7 @@ chore(deps): bump file-type to 22.0.1
    npm run typecheck
    npm test
    ```
-   Os 3 devem passar limpo. CI roda a mesma triade em Node 20 e 22.
+   Os 3 devem passar limpo. CI roda a mesma triade em Node 20 e 22, mais **gitleaks** para detectar credenciais commitadas.
 4. Abra o PR usando o template (`.github/PULL_REQUEST_TEMPLATE.md`).
 5. Marque as caixas do checklist. Items nao-aplicaveis podem ficar unchecked com explicacao.
 6. Aguarde review de pelo menos 1 maintainer.
