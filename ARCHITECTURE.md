@@ -23,12 +23,11 @@ Documento de topologia para contribuidores. Cobre os componentes principais, flu
                             +----------+---------+        +------------------+
                                        |                +------------------+
                             +----------v---------+<------>|  Upstash Redis   |
-                            |   api/ (Vercel     |        |  (rate limit)    |
-                            |   serverless)      |        +------------------+
+                            |   Next.js Server   |        |  (rate limit)    |
+                            |   (Vercel)          |        +------------------+
                             |                    |
-                            |  webhook-telegram  |<------>|  Telegram Bot API|
-                            |  webhook-whatsapp  |<------>|  Evolution API   |
-                            |  whatsapp-qrcode   |
+                            |  /api/webhook-*     |<------>|  Telegram Bot API|
+                            |  /api/whatsapp-qrcode|<----->|  Evolution API   |
                             +--------------------+        +------------------+
                                                         |  Whisper Large V3|
                                                         |  (transcricao)   |
@@ -66,15 +65,15 @@ Rotas Next.js serverless com `runtime = "nodejs"`. **Todas** as rotas de mutacao
 | `POST /api/whatsapp/*` | Operacoes WhatsApp (status, preferences, operations). |
 | `POST /api/tools` | Tool registry dos agentes. |
 
-### 3. Webhooks Vercel Legacy (`api/*.js`)
+### 3. Webhooks (`src/app/api/*/route.ts`)
 
-Tres handlers em **Vercel serverless functions** (nao Next.js App Router) por razoes historicas:
+Tres handlers servidos como Next.js App Router routes, com shape `(Request) => Promise<Response>`:
 
-- `api/webhook-telegram.js` — recebe updates do Telegram. Fail-closed via `TELEGRAM_WEBHOOK_SECRET` (header `x-telegram-bot-api-secret-token`).
-- `api/webhook-whatsapp.js` — recebe eventos da Evolution API. Fail-closed via `WHATSAPP_WEBHOOK_SECRET` (header `x-webhook-secret` ou query `?secret=`).
-- `api/whatsapp-qrcode.js` — QR code para pareamento WhatsApp.
+- `src/app/api/webhook-telegram/route.ts` — recebe updates do Telegram. Fail-closed via `TELEGRAM_WEBHOOK_SECRET` (header `x-telegram-bot-api-secret-token`).
+- `src/app/api/webhook-whatsapp/route.ts` — recebe eventos da Evolution API. Fail-closed via `WHATSAPP_WEBHOOK_SECRET` (header `x-webhook-secret` ou query `?secret=`).
+- `src/app/api/whatsapp-qrcode/route.ts` — QR code para pareamento WhatsApp.
 
-> **Por que nao migrar para App Router?** As funcoes legadas tem shape `(req, res)` em vez de `Request/Response`, e estao deployadas via Vercel Functions (nao Next.js). Migrar para `src/app/api/` quebraria a integracao com Evolution API e a logica de dedupe de updates. Considerado para refactor futuro (veja `docs/adr/`).
+A logica de cada webhook vive em `src/lib/webhooks/*.js` (shape Vercel legacy `(req, res)`), exposta via `src/lib/api/webhook-adapter.ts` que adapta para o shape App Router. Migracao gradual para `Request/Response` nativo é o proximo passo natural — mas o adapter ja elimina a dependencia de Vercel legacy functions (build unificado pelo Next.js, sem cold start separado, com todos os helpers `src/lib/*` disponiveis).
 
 ### 4. Lib (`src/lib/`)
 
@@ -127,10 +126,10 @@ Response { conversationId, assistantMessage, model, usedModel, ... }
 ```
 Telegram user sends message
   v
-api.telegram.org -> POST /api/webhook-telegram (Vercel)
+api.telegram.org -> POST /api/webhook-telegram (Next.js App Router)
   | header x-telegram-bot-api-secret-token == TELEGRAM_WEBHOOK_SECRET (fail-closed)
   v
-api/webhook-telegram.js
+src/app/api/webhook-telegram/route.ts -> src/lib/webhooks/telegram.js
   | 1. dedupe by update_id (in-memory, scoped to function instance)
   | 2. classify: text / audio / photo / pdf / callback
   | 3. transcribe audio via Whisper (if needed)
@@ -145,10 +144,10 @@ Telegram delivers to user
 ```
 WhatsApp user sends message -> Evolution API
   v
-Evolution API -> POST /api/webhook-whatsapp (Vercel)
+Evolution API -> POST /api/webhook-whatsapp (Next.js App Router)
   | header x-webhook-secret (or ?secret=) == WHATSAPP_WEBHOOK_SECRET (fail-closed)
   v
-api/webhook-whatsapp.js
+src/app/api/webhook-whatsapp/route.ts -> src/lib/webhooks/whatsapp.js
   | 1. dedupe by messageId
   | 2. load runtime config (bot enabled, owner check, agent selection)
   | 3. classify: command / text / audio / image / unsupported
@@ -221,7 +220,7 @@ Detalhes completos em `docs/adr/`.
 
 ## Limites Conhecidos
 
-- Chat nao usa streaming (Response stream). Cliente espera o response completo. Plano: implementar streaming com `ReadableStream` + abort signal.
-- Webhooks em `api/*.js` nao sao Next.js App Router. Migracao futura.
+- Chat usa streaming via NDJSON (opt-in via `stream: true` no body do /api/chat). Cliente consome `ReadableStream` e renderiza a resposta incrementalmente. Default continua JSON completo para backward compat com webhooks e outros consumers.
+- Webhooks foram migrados de `api/*.js` (Vercel legacy) para `src/app/api/*/route.ts` (App Router), com adapter Vercel→Next em `src/lib/api/webhook-adapter.ts`. Proximo passo: rewrite direto em `Request/Response` nativo (sem adapter).
 - Bridge local (acesso a filesystem) usa Cloudflare Tunnel + per-action approval. Veja `docs/local-agent-bridge.md`.
 - Knowledge extraction roda `after()` (fire-and-forget pos-response). Em Vercel, se a funcao for morta prematuramente, a extracao e perdida. Fila dedicada e o caminho correto a longo prazo.
