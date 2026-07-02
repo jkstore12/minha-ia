@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { env } from "@/lib/env";
+import { getApiContext, jsonError, withRequestIdHeader } from "@/lib/api/server";
 
 export const runtime = "nodejs";
 export const revalidate = 3600;
@@ -29,8 +30,13 @@ function normalizeModelId(id: string) {
 }
 
 export async function GET(request: Request) {
+  const { requestId } = getApiContext(request, "openrouter-models");
+
   if (env.aiProvider !== "openrouter") {
-    return NextResponse.json({ data: [], provider: env.aiProvider });
+    return withRequestIdHeader(
+      NextResponse.json({ data: [], provider: env.aiProvider }),
+      requestId,
+    );
   }
 
   const url = new URL(request.url);
@@ -56,7 +62,12 @@ export async function GET(request: Request) {
   });
 
   if (!response.ok) {
-    return NextResponse.json({ error: "Não foi possível carregar modelos do OpenRouter." }, { status: 502 });
+    return jsonError("Não foi possível carregar modelos do OpenRouter.", {
+      status: 502,
+      requestId,
+      code: "upstream_error",
+      details: { upstreamStatus: response.status },
+    });
   }
 
   const payload = (await response.json()) as { data?: OpenRouterModel[] };
@@ -80,9 +91,12 @@ export async function GET(request: Request) {
       supportedParameters: model.supported_parameters || [],
     }));
 
-  return NextResponse.json({
-    provider: "openrouter",
-    count: payload.data?.length || 0,
-    data: models,
-  });
+  return withRequestIdHeader(
+    NextResponse.json({
+      provider: "openrouter",
+      count: payload.data?.length || 0,
+      data: models,
+    }),
+    requestId,
+  );
 }

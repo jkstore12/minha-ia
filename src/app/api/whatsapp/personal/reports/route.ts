@@ -1,5 +1,5 @@
-import { NextResponse } from "next/server";
 import { isCronAuthorized } from "@/lib/cron-auth";
+import { getApiContext, jsonResult } from "@/lib/api/server";
 
 export const runtime = "nodejs";
 
@@ -111,10 +111,13 @@ async function sendTelegram(text: string) {
 }
 
 export async function GET(request: Request) {
+  const { requestId } = getApiContext(request, "whatsapp-personal-reports");
+
   if (!isCronAuthorized(request)) {
-    return NextResponse.json(
-      { ok: false, error: "Não autorizado. Configure CRON_SECRET e envie Authorization: Bearer <secret>." },
-      { status: 401 },
+    return jsonResult(
+      false,
+      { error: "Não autorizado. Configure CRON_SECRET e envie Authorization: Bearer <secret>." },
+      { status: 401, requestId },
     );
   }
 
@@ -122,13 +125,17 @@ export async function GET(request: Request) {
   const type = url.searchParams.get("type") === "daily" ? "daily" : "summary";
   const rows = await loadRows(type);
   if (!rows) {
-    return NextResponse.json({
-      ok: false,
-      sent: false,
-      error: "Configure NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, WHATSAPP_OWNER_USER_ID, TELEGRAM_BOT_TOKEN e TELEGRAM_OWNER_CHAT_ID.",
-    });
+    return jsonResult(
+      false,
+      {
+        sent: false,
+        error:
+          "Configure NEXT_PUBLIC_SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, WHATSAPP_OWNER_USER_ID, TELEGRAM_BOT_TOKEN e TELEGRAM_OWNER_CHAT_ID.",
+      },
+      { status: 503, requestId },
+    );
   }
 
   const sent = await sendTelegram(formatRows(rows, type));
-  return NextResponse.json({ ok: true, type, count: rows.length, sent });
+  return jsonResult(true, { type, count: rows.length, sent }, { requestId });
 }

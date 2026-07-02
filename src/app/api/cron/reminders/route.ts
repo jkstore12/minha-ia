@@ -1,6 +1,6 @@
-import { NextResponse } from "next/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { isCronAuthorized } from "@/lib/cron-auth";
+import { getApiContext, jsonResult } from "@/lib/api/server";
 import {
   buildAfterDeliveryPatch,
   formatReminder,
@@ -107,15 +107,18 @@ async function deliverReminder(supabase: SupabaseClient, task: ReminderTask) {
 }
 
 export async function GET(request: Request) {
+  const { requestId } = getApiContext(request, "cron-reminders");
+
   if (!isCronAuthorized(request)) {
-    return NextResponse.json(
-      { ok: false, error: "Não autorizado. Configure CRON_SECRET e envie Authorization: Bearer <secret>." },
-      { status: 401 },
+    return jsonResult(
+      false,
+      { error: "Não autorizado. Configure CRON_SECRET e envie Authorization: Bearer <secret>." },
+      { status: 401, requestId },
     );
   }
 
   if (process.env.REMINDERS_CRON_ENABLED === "false") {
-    return NextResponse.json({ ok: true, disabled: true, count: 0, processed: [] });
+    return jsonResult(true, { disabled: true, count: 0, processed: [] }, { requestId });
   }
 
   const supabase = getSupabaseAdmin();
@@ -131,7 +134,11 @@ export async function GET(request: Request) {
     .limit(10);
 
   if (error) {
-    return NextResponse.json({ ok: false, error: "Não foi possível buscar lembretes vencidos." }, { status: 500 });
+    return jsonResult(
+      false,
+      { error: "Não foi possível buscar lembretes vencidos." },
+      { status: 500, requestId },
+    );
   }
 
   const tasks = (data || []) as ReminderTask[];
@@ -178,5 +185,5 @@ export async function GET(request: Request) {
     });
   }
 
-  return NextResponse.json({ ok: true, checkedAt: nowIso, count: tasks.length, processed });
+  return jsonResult(true, { checkedAt: nowIso, count: tasks.length, processed }, { requestId });
 }

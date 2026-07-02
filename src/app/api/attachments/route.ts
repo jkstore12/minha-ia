@@ -6,15 +6,15 @@ import {
   sniffAndValidateMime,
 } from "@/lib/chat/attachments";
 import { hasSupabaseEnv } from "@/lib/env";
+import { getApiContext, jsonError, withRequestIdHeader } from "@/lib/api/server";
 import { createClient } from "@/lib/supabase/server";
-import { createLogger } from "@/lib/log";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const logger = createLogger("attachments-upload");
+  const { requestId, logger } = getApiContext(request, "attachments-upload");
   if (!hasSupabaseEnv()) {
-    return NextResponse.json({ error: "Supabase não configurado." }, { status: 503 });
+    return jsonError("Supabase não configurado.", { status: 503, requestId, code: "supabase_not_configured" });
   }
 
   const supabase = await createClient();
@@ -24,18 +24,23 @@ export async function POST(request: Request) {
   } = await supabase.auth.getUser();
 
   if (userError || !user) {
-    return NextResponse.json({ error: "Sessão expirada. Entre novamente." }, { status: 401 });
+    return jsonError("Sessão expirada. Entre novamente.", { status: 401, requestId, code: "auth_expired" });
   }
 
   const formData = await request.formData().catch(() => null);
   const file = formData?.get("file");
 
   if (!(file instanceof File)) {
-    return NextResponse.json({ error: "Envie um arquivo valido." }, { status: 400 });
+    return jsonError("Envie um arquivo valido.", { status: 400, requestId, code: "validation_failed" });
   }
 
   if (file.size > MAX_ATTACHMENT_BYTES) {
-    return NextResponse.json({ error: "Arquivo grande demais. Limite: 25 MB por arquivo." }, { status: 413 });
+    return jsonError("Arquivo grande demais. Limite: 25 MB por arquivo.", {
+      status: 413,
+      requestId,
+      code: "file_too_large",
+      details: { maxBytes: MAX_ATTACHMENT_BYTES, receivedBytes: file.size },
+    });
   }
 
   // Magic-byte sniffing para evitar que um `.exe` renomeado para `.jpg`
@@ -57,14 +62,15 @@ export async function POST(request: Request) {
       reason: sniff.reason,
       detectedMime: sniff.detectedMime,
     });
-    return NextResponse.json(
-      {
-        error: "Tipo de arquivo nao permitido.",
+    return jsonError("Tipo de arquivo nao permitido.", {
+      status: 415,
+      requestId,
+      code: "unsupported_media_type",
+      details: {
         reason: sniff.reason,
         ...(sniff.detectedMime ? { detectedMime: sniff.detectedMime } : {}),
       },
-      { status: 415 },
-    );
+    });
   }
 
   const fileName = sanitizeFileName(file.name);
@@ -86,16 +92,20 @@ export async function POST(request: Request) {
       sizeBytes: file.size,
       supabaseError: uploadError.message,
     });
-    return NextResponse.json(
-      { error: "Não foi possível enviar o arquivo. Confira se o setup do Supabase Storage foi aplicado." },
-      { status: 500 },
-    );
+    return jsonError("Não foi possível enviar o arquivo. Confira se o setup do Supabase Storage foi aplicado.", {
+      status: 500,
+      requestId,
+      code: "upload_failed",
+    });
   }
 
-  return NextResponse.json({
-    storage_path: storagePath,
-    file_name: fileName,
-    mime_type: mimeType,
-    size_bytes: file.size,
-  });
+  return withRequestIdHeader(
+    NextResponse.json({
+      storage_path: storagePath,
+      file_name: fileName,
+      mime_type: mimeType,
+      size_bytes: file.size,
+    }),
+    requestId,
+  );
 }

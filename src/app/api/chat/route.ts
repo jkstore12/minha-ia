@@ -17,6 +17,7 @@ import {
 import { env, hasAiEnv, hasSupabaseEnv } from "@/lib/env";
 import { consume as consumeRateLimit } from "@/lib/rate-limit";
 import { createLogger, extractOrCreateRequestId } from "@/lib/log";
+import { jsonError } from "@/lib/api/server";
 import { createClient } from "@/lib/supabase/server";
 import { parseUserPreferences } from "@/lib/user-preferences";
 import { truncateTitle } from "@/lib/utils";
@@ -173,7 +174,11 @@ export async function POST(request: Request) {
   const logger = createLogger("chat", requestId);
 
   if (!hasSupabaseEnv()) {
-    return withRequestId(NextResponse.json({ error: "Supabase não configurado." }, { status: 503 }), requestId);
+    return jsonError("Supabase não configurado.", {
+      status: 503,
+      requestId,
+      code: "supabase_not_configured",
+    });
   }
 
   if (!hasAiEnv()) {

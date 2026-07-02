@@ -1,6 +1,6 @@
-import { NextResponse } from "next/server";
 import { CHAT_ATTACHMENTS_BUCKET } from "@/lib/chat/attachments";
 import { hasSupabaseEnv } from "@/lib/env";
+import { getApiContext, jsonError, withRequestIdOnResponse } from "@/lib/api/server";
 import { createClient } from "@/lib/supabase/server";
 
 export const runtime = "nodejs";
@@ -9,9 +9,11 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
+  const { requestId } = getApiContext(request, "attachments-download");
+
   if (!hasSupabaseEnv()) {
-    return NextResponse.json({ error: "Supabase não configurado." }, { status: 503 });
+    return jsonError("Supabase não configurado.", { status: 503, requestId, code: "supabase_not_configured" });
   }
 
   const { id } = await context.params;
@@ -22,7 +24,7 @@ export async function GET(_request: Request, context: RouteContext) {
   } = await supabase.auth.getUser();
 
   if (userError || !user) {
-    return NextResponse.json({ error: "Sessão expirada. Entre novamente." }, { status: 401 });
+    return jsonError("Sessão expirada. Entre novamente.", { status: 401, requestId, code: "auth_expired" });
   }
 
   const { data: attachment, error } = await supabase
@@ -33,7 +35,7 @@ export async function GET(_request: Request, context: RouteContext) {
     .single();
 
   if (error || !attachment) {
-    return NextResponse.json({ error: "Arquivo não encontrado." }, { status: 404 });
+    return jsonError("Arquivo não encontrado.", { status: 404, requestId, code: "not_found" });
   }
 
   const { data, error: downloadError } = await supabase.storage
@@ -41,16 +43,19 @@ export async function GET(_request: Request, context: RouteContext) {
     .download(attachment.storage_path);
 
   if (downloadError || !data) {
-    return NextResponse.json({ error: "Não foi possível baixar o arquivo." }, { status: 404 });
+    return jsonError("Não foi possível baixar o arquivo.", { status: 404, requestId, code: "not_found" });
   }
 
-  return new Response(data, {
-    headers: {
-      "Content-Type": attachment.mime_type || "application/octet-stream",
-      "Content-Disposition": `inline; filename="${encodeURIComponent(attachment.file_name)}"`,
-      // private, no-store: arquivos do usuario podem conter PII.
-      // Nenhum proxy/CDn deve cachear.
-      "Cache-Control": "private, no-store",
-    },
-  });
+  return withRequestIdOnResponse(
+    new Response(data, {
+      headers: {
+        "Content-Type": attachment.mime_type || "application/octet-stream",
+        "Content-Disposition": `inline; filename="${encodeURIComponent(attachment.file_name)}"`,
+        // private, no-store: arquivos do usuario podem conter PII.
+        // Nenhum proxy/CDN deve cachear.
+        "Cache-Control": "private, no-store",
+      },
+    }),
+    requestId,
+  );
 }

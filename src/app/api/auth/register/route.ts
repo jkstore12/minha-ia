@@ -1,6 +1,5 @@
-import { NextResponse } from "next/server";
 import { z } from "zod";
-import { jsonError, parseJson } from "@/lib/api/server";
+import { getApiContext, jsonError, jsonResult, parseJson } from "@/lib/api/server";
 import { getSupabaseAdminClient, hasSupabaseServiceRole } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -42,13 +41,24 @@ async function upsertPendingProfile(input: { userId: string; name: string }) {
 }
 
 export async function POST(request: Request) {
+  const { requestId, logger } = getApiContext(request, "auth-register");
+
   if (!hasSupabaseServiceRole()) {
-    return jsonError("Cadastro seguro não configurado. Configure SUPABASE_SERVICE_ROLE_KEY.", 500);
+    return jsonError("Cadastro seguro não configurado. Configure SUPABASE_SERVICE_ROLE_KEY.", {
+      status: 500,
+      requestId,
+      code: "supabase_service_role_missing",
+    });
   }
 
   const parsed = RegisterInput.safeParse(await parseJson(request));
   if (!parsed.success) {
-    return jsonError(parsed.error.issues[0]?.message || "Dados invalidos.");
+    return jsonError(parsed.error.issues[0]?.message || "Dados invalidos.", {
+      status: 400,
+      requestId,
+      code: "validation_failed",
+      details: { issues: parsed.error.issues },
+    });
   }
 
   const { name, email, password } = parsed.data;
@@ -65,25 +75,46 @@ export async function POST(request: Request) {
   if (created.error || !created.data.user) {
     const message = created.error?.message?.toLowerCase() || "";
     if (message.includes("already") || message.includes("registered") || message.includes("exists")) {
-      return jsonError("Esse e-mail já tem uma conta. Use Entrar ou fale com o administrador.", 409);
+      return jsonError("Esse e-mail já tem uma conta. Use Entrar ou fale com o administrador.", {
+        status: 409,
+        requestId,
+        code: "email_taken",
+      });
     }
     if (message.includes("invalid")) {
-      return jsonError("Use um e-mail real e válido.", 400);
+      return jsonError("Use um e-mail real e válido.", {
+        status: 400,
+        requestId,
+        code: "invalid_email",
+      });
     }
-    return jsonError("Não foi possível criar a conta agora.", 500);
+    logger.error("auth.register.createUserFailed", { supabaseMessage: created.error?.message });
+    return jsonError("Não foi possível criar a conta agora.", {
+      status: 500,
+      requestId,
+      code: "create_user_failed",
+    });
   }
 
   const userId = created.data.user.id;
   try {
     await upsertPendingProfile({ userId, name });
-  } catch {
+  } catch (err) {
+    logger.error("auth.register.profileUpsertFailed", {
+      userId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    // Rollback: deleta o user que criamos para nao deixar orfao.
     await service.auth.admin.deleteUser(userId);
-    return jsonError("Não foi possível preparar o perfil da conta.", 500);
+    return jsonError("Não foi possível preparar o perfil da conta.", {
+      status: 500,
+      requestId,
+      code: "profile_upsert_failed",
+    });
   }
 
-  return NextResponse.json({
-    ok: true,
+  return jsonResult(true, {
     status: "pending",
     message: "Conta criada. Ela precisa ser aprovada pelo administrador principal.",
-  });
+  }, { requestId });
 }
